@@ -1,5 +1,9 @@
 # Ventilator pressure experiments
 
+**Latest result:** the three-seed LSTM average reached **0.197748 validation inspiratory MAE**, below 0.20 on the original breath holdout. See [LSTM_ENSEMBLE.md](LSTM_ENSEMBLE.md) for the script, individual scores, saved models, and submission update. `experiments/best.json` now points to that ensemble. Nothing was uploaded to the leaderboard by these scripts.
+
+The sections below preserve the earlier experiment batch, whose best was 0.214090. Its postprocessing comparison and bootstrap tables describe that batch; the latest ensemble is logged in `experiments/results.csv` and its own run summary.
+
 ## Recorded history
 
 All validation scores use a 20% whole-breath holdout, `GroupShuffleSplit(random_state=42)`, scored only where `u_out == 0`.
@@ -87,11 +91,11 @@ The extended feature bundle adds longer leads/lags, rolling standard deviations,
 
 The large model's increased size and longer training budget are a combined experiment, so that gain cannot be assigned to either factor separately. A blend of the two small neural models also helps (0.333660, or 0.332939 with snapping), but none of the tested blends beats the selected large-model pipeline.
 
-## Best saved pipeline and verification
+## Previous pipeline and verification (0.21409)
 
-**Best validation inspiratory MAE: 0.2140895873. The <0.20 goal has not been reached.** This is a 71.0% reduction from the previous model's validation MAE of 0.737145, with another 6.6% reduction still needed to get below 0.20.
+**At the end of that batch, the best validation inspiratory MAE was 0.2140895873.** The <0.20 goal had not yet been reached. This was a 71.0% reduction from the previous model's validation MAE of 0.737145. The later three-seed ensemble above closes the remaining gap.
 
-`experiments/best.json` points to `artifacts/experiments/selected/ensemble.json`. Despite the generic descriptor name, the selected pipeline is one neural model plus its additive residual tree and pressure-level snapping; it is not an average of multiple neural models. Required saved artifacts:
+At that point, `experiments/best.json` pointed to `artifacts/experiments/selected/ensemble.json`. That older descriptor remains available. Despite its generic name, that pipeline is one neural model plus its additive residual tree and pressure-level snapping; it is not an average of multiple neural models. Its saved artifacts:
 
 - `artifacts/experiments/lstm_large_extended/model.pt`: neural weights, training-fitted scaler, feature columns, architecture, and epoch.
 - `artifacts/experiments/lstm_large_extended_residual_tree/model.joblib`: residual tree and its neural-checkpoint reference.
@@ -100,13 +104,13 @@ The large model's increased size and longer training budget are a combined exper
 
 Model binaries are local artifacts, ignored by Git. The scripts, configurations, environment, and result tables are versioned. The saved checkpoint uses only the training partition; there has been no full-data refit falsely assigned this holdout score.
 
-Checkpoint reload/replay passed on **7,767 inspiratory validation rows**, reproducing the saved predictions exactly. The original `submission.csv` is preserved (SHA256 `E0192518690626E23B1297118B264C69DFFF5AFB656DFF9C514C2D36043E36D7`). The separate `outputs/candidate_submission.csv` passed an independent check of all **603,600** rows: exact sample columns and ID order, with finite predictions. **Nothing has been submitted.**
+During that batch, checkpoint reload/replay passed on **7,767 inspiratory validation rows**, reproducing the saved predictions exactly. The then-original `submission.csv` was preserved (SHA256 `E0192518690626E23B1297118B264C69DFFF5AFB656DFF9C514C2D36043E36D7`). The separate 0.21409 `outputs/candidate_submission.csv` passed an independent check of all **603,600** rows: exact sample columns and ID order, with finite predictions. Later requests replaced `submission.csv`; its current contents are documented in LSTM_ENSEMBLE.md. No leaderboard upload was performed by these scripts.
 
 `models/best_model_bundle.zip` packages the selected weights, preprocessing/pipeline metadata, source code, environment record, result tables, and validation-replay snapshot. It includes a SHA256 manifest and an inference README; original CSV datasets and Python packages are not included. Other experiments' model binaries remain available locally under `artifacts/experiments/`.
 
 Full results are in `experiments/results.csv`; postprocessing comparisons in `experiments/comparisons.csv`; uncertainty tables in `experiments/ablation_bootstrap.csv` and `experiments/paired_bootstrap.csv`. The selected pipeline's error tables are `artifacts/experiments/selected/mae_by_step.csv` and `mae_by_lung.csv`. Blank step MAEs mean no scored rows exist at that step.
 
-## What to try next, before submitting
+## Recommendations from that earlier batch
 
 1. **Train additional independent neural seeds or grouped folds and ensemble comparable models.** Blending the two small neural models already worked, while mixing a strong neural model with a much weaker tree did not. Two or more models comparable to the large LSTM are the strongest next experiment; getting below 0.20 is plausible, not demonstrated yet.
 2. **Target the current hardest lung settings, not just C=10.** The selected pipeline's MAEs are 0.329230 for `(R=50,C=50)` and 0.293580 for `(50,20)`, versus 0.224239 for `(50,10)`. Test shared-model fine-tuning or conditional experts for those two hard groups, retaining the global model elsewhere. Step 0 is now 0.162454, so it is no longer the main problem.

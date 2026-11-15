@@ -255,7 +255,8 @@ def train_tree(args, x, y, mask, columns, tr, va, folder):
     return score, model.best_iteration_, "model.joblib"
 
 
-def record(args, score, iteration, model_file, folder, ids, va, y, mask, columns, x, elapsed):
+def record(args, score, iteration, model_file, folder, ids, va, y, mask, columns, x, elapsed,
+           promote=True):
     pred = np.load(folder / "validation_predictions.npy")
     error = np.abs(pred - y[va])
     rc_codes = np.asarray(x[va, 0, columns.index("R_C")], dtype=int)
@@ -284,7 +285,7 @@ def record(args, score, iteration, model_file, folder, ids, va, y, mask, columns
             writer.writeheader()
         writer.writerow(result)
     best_file = TRACK / "best.json"
-    if not best_file.exists() or score < json.loads(best_file.read_text())["validation_mae"]:
+    if promote and (not best_file.exists() or score < json.loads(best_file.read_text())["validation_mae"]):
         best_file.write_text(json.dumps(result, indent=2))
         print("Saved new best model manifest:", best_file, flush=True)
     print(json.dumps(result, indent=2), flush=True)

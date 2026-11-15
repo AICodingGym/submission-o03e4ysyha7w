@@ -143,5 +143,67 @@
     "seed": 42,
     "base": "lstm_large_extended",
     "method": "residual_tree"
+  },
+  "lstm_3seed_seed_43": {
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "run_name": "lstm_3seed",
+    "profile": "extended",
+    "hidden": 192,
+    "layers": 3,
+    "epochs": 160,
+    "batch_size": 256,
+    "lr": 0.001,
+    "patience": 20,
+    "reuse_existing": true,
+    "baseline_mae": null,
+    "output": "C:\\Users\\KateM\\Desktop\\DSC 102\\sympy\\ventilator-pressure-prediction\\submission.csv",
+    "name": "lstm_3seed_seed_43",
+    "seed": 43,
+    "kind": "lstm"
+  },
+  "lstm_3seed_seed_44": {
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "run_name": "lstm_3seed",
+    "profile": "extended",
+    "hidden": 192,
+    "layers": 3,
+    "epochs": 160,
+    "batch_size": 256,
+    "lr": 0.001,
+    "patience": 20,
+    "reuse_existing": true,
+    "baseline_mae": null,
+    "output": "C:\\Users\\KateM\\Desktop\\DSC 102\\sympy\\ventilator-pressure-prediction\\submission.csv",
+    "name": "lstm_3seed_seed_44",
+    "seed": 44,
+    "kind": "lstm"
+  },
+  "lstm_3seed": {
+    "profile": "extended",
+    "hidden": 192,
+    "layers": 3,
+    "epochs": 160,
+    "batch_size": 256,
+    "lr": 0.001,
+    "patience": 20,
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "split_sha256": "45fc6be0675e269600bc31e117e5848cac60eafcb4c6dfe7318cf3cc55dad91e",
+    "train_sha256": "2dc30dc5c8e603c8c68200830eab7ed8c7af42c823f8ae68b0beb663eea817d7",
+    "feature_sha256": "4d06d263206db65f23bea361be5c43327938369d1a536c9def3ad8d6eaaa0d29",
+    "name": "lstm_3seed",
+    "kind": "ensemble",
+    "seed": "42,43,44"
   }
 }

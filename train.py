@@ -18,6 +18,33 @@ FEATURES = ["u_in", "u_out", "R", "C"]
 ROOT = Path(__file__).resolve().parent
 
 
+def print_validation_error_analysis(train, valid_idx, predictions):
+    """Report row-weighted inspiratory errors by breath step and lung setting."""
+    validation = train.iloc[valid_idx].copy()
+    # Count all steps before filtering out expiratory rows so positions stay intact.
+    validation["step_index"] = validation.groupby("breath_id", sort=False).cumcount()
+    validation["absolute_error"] = np.abs(
+        validation["pressure"].to_numpy() - predictions
+    )
+    inspiratory = validation.loc[validation["u_out"] == 0]
+
+    by_step = inspiratory.groupby("step_index").agg(
+        inspiratory_rows=("absolute_error", "size"),
+        inspiratory_mae=("absolute_error", "mean"),
+    ).reindex(range(80))
+    by_step["inspiratory_rows"] = by_step["inspiratory_rows"].fillna(0).astype(int)
+    by_lung = inspiratory.groupby(["R", "C"]).agg(
+        inspiratory_rows=("absolute_error", "size"),
+        inspiratory_mae=("absolute_error", "mean"),
+    ).sort_values("inspiratory_mae", ascending=False)
+
+    print("\nValidation inspiratory MAE by step within breath (0-79):", flush=True)
+    print(by_step.to_string(float_format="{:.6f}".format, na_rep="N/A"), flush=True)
+    print("N/A means no inspiratory validation rows at that step.", flush=True)
+    print("\nValidation inspiratory MAE by (R, C), highest error first:", flush=True)
+    print(by_lung.to_string(float_format="{:.6f}".format), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path,
@@ -62,6 +89,7 @@ def main():
     score = mean_absolute_error(y.iloc[valid_idx].to_numpy()[inspiratory],
                                 valid_predictions[inspiratory])
     print(f"Validation inspiratory MAE (u_out == 0): {score:.6f}", flush=True)
+    print_validation_error_analysis(train, valid_idx, valid_predictions)
 
     print("Refitting on all training breaths...", flush=True)
     model.fit(X, y)

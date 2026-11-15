@@ -175,7 +175,7 @@ def train_neural(args, x, y, mask, columns, tr, va, folder):
     model = build_network(values.shape[-1], args.hidden, args.layers).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=1e-5)
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=getattr(args, "amp_initial_scale", 65536.0))
     best, patience, best_epoch = float("inf"), 0, 0
     history = folder / "epochs.csv"
     for epoch in range(1, args.epochs + 1):

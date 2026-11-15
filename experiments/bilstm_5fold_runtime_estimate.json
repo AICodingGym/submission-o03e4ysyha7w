@@ -1,0 +1,18 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "breaths": 67905,
+  "input_size": 92,
+  "hidden": 256,
+  "layers": 4,
+  "batch_size": 256,
+  "max_epochs": 160,
+  "train_step_seconds": 0.10310000000172295,
+  "validation_step_seconds": 0.0375,
+  "estimated_epoch_seconds": 23.985300000366987,
+  "estimated_five_fold_hours": 5.33006666674822,
+  "estimated_range_hours": [
+    4.264053333398576,
+    6.929086666772686
+  ],
+  "note": "Excludes feature preparation/checkpoint overhead; early stopping can shorten this. Thermals, other GPU work, and machine sleep can extend wall time."
+}

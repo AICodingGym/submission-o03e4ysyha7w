@@ -10,6 +10,7 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision.models import resnet34
 
+from architecture_clock import awake_seconds
 from dataset import SIZE
 from unet import OUTPUT, Slices, UNet, batches, jitter_scale, validate
 
@@ -132,7 +133,7 @@ def train(args):
     torch.manual_seed(102)
     np_rng = np.random.default_rng(102)
     device = torch.device("cuda")
-    start = time.perf_counter()
+    start = awake_seconds()
     model = make_model(args.model, pretrained=not args.initialize).to(device, memory_format=torch.channels_last)
     if args.initialize:
         model.load_state_dict(torch.load(ROOT / f"{args.initialize}.pt", map_location=device, weights_only=True))
@@ -152,11 +153,11 @@ def train(args):
     best, stagnant = -1.0, 0
     completed, reason = 0, "epoch_limit"
     for epoch in range(1, args.epochs + 1):
-        if time.perf_counter() - start >= args.budget * 60:
+        if awake_seconds() - start >= args.budget * 60:
             print("Training budget reached", flush=True)
             reason = "time_budget"
             break
-        epoch_start = time.perf_counter()
+        epoch_start = awake_seconds()
         model.train()
         loss_sum = torch.zeros((), device=device)
         opt.zero_grad(set_to_none=True)
@@ -178,10 +179,10 @@ def train(args):
                     schedule.step()
             if (i + 1) % 500 == 0:
                 print(f"{args.run} epoch {epoch} batch {i+1}/{micro_batches}", flush=True)
-        train_seconds = time.perf_counter() - epoch_start
+        train_seconds = awake_seconds() - epoch_start
         row = validate(model, val, device, args.batch)
         row.update(epoch=epoch, loss=float(loss_sum / len(fit.keys)), train_seconds=train_seconds,
-                   validation_seconds=time.perf_counter() - epoch_start - train_seconds,
+                   validation_seconds=awake_seconds() - epoch_start - train_seconds,
                    lr=opt.param_groups[0]["lr"])
         with (ROOT / f"{args.run}_epochs.jsonl").open("a") as f:
             f.write(json.dumps(row) + "\n")
@@ -199,7 +200,7 @@ def train(args):
             reason = "patience"
             break
     report = dict(run=args.run, reason=reason, completed_epochs=completed,
-                  best_validation_dice=best, elapsed_seconds=time.perf_counter() - start)
+                  best_validation_dice=best, elapsed_seconds=awake_seconds() - start)
     temporary = ROOT / f"{args.run}_status.tmp"
     temporary.write_text(json.dumps(report, indent=2))
     temporary.replace(ROOT / f"{args.run}_status.json")

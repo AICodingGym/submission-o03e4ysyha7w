@@ -1,8 +1,7 @@
-﻿"""Score and export architecture candidates using native masks and 3D distances."""
+"""Score and export architecture candidates using native masks and 3D distances."""
 import argparse
 import hashlib
 import json
-import time
 
 import numpy as np
 import torch
@@ -11,6 +10,7 @@ from scipy import ndimage
 
 from architecture_trials import ROOT, make_model
 from atlas import OUTPUT, resize
+from architecture_clock import awake_seconds
 from dataset import CLASSES, DatasetArchive, encode
 from unet import Slices, scan_probabilities, smooth_slices
 from volume_metrics import normalized_hausdorff
@@ -18,7 +18,6 @@ from volume_metrics import normalized_hausdorff
 FIXED = (0.40, 0.45, 0.45)
 MINIMUM = (1820, 1300, 1820)
 GRID = (0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60)
-BEST_CSV = OUTPUT / "small_bowel_trials" / "threshold_components.csv"
 
 
 def load(spec):
@@ -68,7 +67,7 @@ def organ_metrics(probabilities, targets, low_target, threshold, minimum):
 
 
 def evaluate(models, archive, batch, name):
-    start = time.perf_counter()
+    start = awake_seconds()
     validation = Slices("validation")
     settings = [tuple(dict.fromkeys([(0.5, 0), (fixed, 0), (fixed, minimum)] +
                                      [(threshold, minimum) for threshold in GRID]))
@@ -113,7 +112,7 @@ def evaluate(models, archive, batch, name):
                                  in zip(per_organ, FIXED, MINIMUM)]),
         tuned_cleanup=summarize(selected),
         trials={organ: list(rows.values()) for organ, rows in zip(CLASSES, per_organ)},
-        validation_seconds=time.perf_counter() - start,
+        validation_seconds=awake_seconds() - start,
     )
     (ROOT / f"{name}_assessment.json").write_text(json.dumps(report, indent=2))
     print(json.dumps({k: v for k, v in report.items() if k != "trials"}), flush=True)

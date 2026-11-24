@@ -62,7 +62,7 @@ class Residual(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, packed=False, context=CONTEXT):
+    def __init__(self, packed=False, context=CONTEXT, deep_encoder=False):
         super().__init__()
         self.packed = packed
         widths = (24, 40, 64, 96, 160)
@@ -71,6 +71,11 @@ class UNet(nn.Module):
             nn.Sequential(Residual(a, b, 2), Residual(b, b))
             for a, b in zip(widths, widths[1:])
         )
+        self.encoder_extra = nn.Sequential()
+        if deep_encoder:
+            block = Residual(widths[-1], widths[-1])
+            nn.init.zeros_(block.body[-1].weight)
+            self.encoder_extra = nn.Sequential(block)
         self.decoder = nn.ModuleList(
             Residual(a + b, b) for a, b in zip(widths[:0:-1], widths[-2::-1])
         )
@@ -83,6 +88,8 @@ class UNet(nn.Module):
         for block in self.encoder:
             features.append(block(features[-1]))
         x = features.pop()
+        for block in self.encoder_extra:
+            x = x + block.body(x)
         for block, skip in zip(self.decoder, reversed(features)):
             x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
             x = block(torch.cat((x, skip), dim=1))
@@ -111,11 +118,22 @@ def metrics_row(scores):
 def validate(model, data, device, batch):
     model.eval()
     totals = torch.zeros(3, 3, dtype=torch.float64, device=device)
+    loss_sum = torch.zeros((), device=device)
     for indices in batches(len(data.keys), batch):
-        pred = infer(model, data.inputs(indices, device)) >= 0.5
-        target = data.targets(indices, device).bool()
+        inputs = data.inputs(indices, device)
+        target = data.targets(indices, device)
+        with torch.autocast(device.type, enabled=inputs.is_cuda):
+            logits = model(inputs)
+            probs = logits.float().sigmoid()
+            overlap = (probs * target).sum((0, 2, 3))
+            soft_dice = (2 * overlap + 1) / ((probs + target).sum((0, 2, 3)) + 1)
+            loss_sum += len(indices) * (F.binary_cross_entropy_with_logits(logits, target)
+                                        + 1 - soft_dice.mean())
+        pred = probs >= 0.5
+        target = target.bool()
         totals += torch.stack([v.sum((0, 2, 3)) for v in (pred & target, pred, target)])
-    return metrics_row(dice(*totals.cpu().numpy()))
+    return dict(metrics_row(dice(*totals.cpu().numpy())),
+                validation_loss=float(loss_sum / len(data.keys)))
 
 
 def jitter_scale(images, masks, translation=0.0):
@@ -134,8 +152,16 @@ def train(model, device, args, prefix):
     fitting, validation = Slices("fit"), Slices("validation")
     rng = np.random.default_rng(102)
     learning_rate = 0.0002 if args.fine_tune_from else 0.001
+    if args.lr is not None:
+        learning_rate = args.lr
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, fused=device.type == "cuda")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=0.00003)
+    if args.schedule == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=0, threshold=0.002, threshold_mode="abs"
+        )
+    elif args.schedule == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
     best = -1
     weights = torch.tensor([1.0, args.small_bowel_loss_weight, 1.0], device=device)
@@ -161,6 +187,10 @@ def train(model, device, args, prefix):
                 overlap = (probabilities * masks).sum(axes)
                 soft_dice = (2 * overlap + 1) / ((probabilities + masks).sum(axes) + 1)
                 dice_score = soft_dice.mean() if args.small_bowel_loss_weight == 1 else (soft_dice * weights).sum()
+                if args.objective == "focal":
+                    per_pixel = F.binary_cross_entropy_with_logits(logits, masks, reduction="none")
+                    wrong = torch.where(masks.bool(), 1 - probabilities, probabilities)
+                    bce = (wrong.square() * per_pixel).mean()
                 loss = bce + 1 - dice_score
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -170,7 +200,7 @@ def train(model, device, args, prefix):
                 print(f"Epoch {epoch}, batch {i}, {time.perf_counter() - then:.1f}s", flush=True)
         elapsed = time.perf_counter() - then
         result = validate(model, validation, device, args.batch)
-        result.update(epoch=epoch, loss=float(running_loss / i), train_seconds=elapsed,
+        result.update(epoch=epoch, lr=optimizer.param_groups[0]["lr"], loss=float(running_loss / i), train_seconds=elapsed,
                       validation_seconds=time.perf_counter() - then - elapsed)
         with (OUTPUT / f"{prefix}_epochs.jsonl").open("a") as log:
             log.write(json.dumps(result) + "\n")
@@ -180,9 +210,12 @@ def train(model, device, args, prefix):
             temporary = OUTPUT / f"{prefix}.tmp"
             torch.save(model.state_dict(), temporary)
             temporary.replace(OUTPUT / f"{prefix}.pt")
-            if epoch == 1 and args.fine_tune_from is None:
+            if epoch == 1 and args.fine_tune_from is None and not args.train_only:
                 assess(model, device, args.batch, prefix, compare=False)
-        scheduler.step()
+        if args.schedule == "plateau":
+            scheduler.step(result["macro_dice"])
+        else:
+            scheduler.step()
 
 
 def scan_probabilities(model, data, device, batch, flip):
@@ -367,6 +400,12 @@ def export(model, archive, device, batch, method, threshold, prefix):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-name")
+    parser.add_argument("--train-only", action="store_true")
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--schedule", choices=("cosine", "plateau", "step"), default="cosine")
+    parser.add_argument("--objective", choices=("bce", "focal"), default="bce")
+    parser.add_argument("--deep-encoder", action="store_true")
     parser.add_argument("--epochs", type=int, default=18)
     parser.add_argument("--batch", type=int, default=24)
     parser.add_argument("--evaluate", action="store_true")
@@ -400,6 +439,14 @@ def main():
         prefix += f"_bowel_weight{args.small_bowel_loss_weight:g}"
     if args.translation_jitter:
         prefix += f"_translation{args.translation_jitter:g}"
+    if args.run_name:
+        if not args.run_name.replace("_", "").isalnum():
+            parser.error("run name must contain only letters, digits, and underscores")
+        prefix = args.run_name
+    if args.lr is not None and (not np.isfinite(args.lr) or args.lr <= 0):
+        parser.error("learning rate must be positive and finite")
+    if args.train_only and args.evaluate:
+        parser.error("--train-only and --evaluate are mutually exclusive")
     torch.manual_seed(102)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.allow_tf32 = True
@@ -407,12 +454,12 @@ def main():
     if args.ensemble:
         ensemble = nn.ModuleList()
         for path in args.ensemble:
-            member = UNet(packed=args.packed).to(device, memory_format=torch.channels_last)
+            member = UNet(packed=args.packed, deep_encoder=args.deep_encoder).to(device, memory_format=torch.channels_last)
             member.load_state_dict(torch.load(path, map_location=device, weights_only=True))
             ensemble.append(member)
         assess(ensemble, device, args.batch, f"{prefix}_ensemble")
         return
-    model = UNet(packed=args.packed).to(device, memory_format=torch.channels_last)
+    model = UNet(packed=args.packed, deep_encoder=args.deep_encoder).to(device, memory_format=torch.channels_last)
     if not args.evaluate:
         if args.fine_tune_from:
             weights = torch.load(args.fine_tune_from, map_location=device, weights_only=True)
@@ -423,8 +470,12 @@ def main():
                     padded = torch.zeros_like(destination[name])
                     padded[:, extra // 2:extra // 2 + weights[name].shape[1]] = weights[name]
                     weights[name] = padded
-            model.load_state_dict(weights)
+            missing, unexpected = model.load_state_dict(weights, strict=not args.deep_encoder)
+            if unexpected or any(not key.startswith("encoder_extra.") for key in missing):
+                raise ValueError(f"Incompatible checkpoint: missing={missing}, extra={unexpected}")
         train(model, device, args, prefix)
+        if args.train_only:
+            return
     model.load_state_dict(torch.load(OUTPUT / f"{prefix}.pt", map_location=device, weights_only=True))
     assess(model, device, args.batch, prefix)
 

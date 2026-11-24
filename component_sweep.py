@@ -50,6 +50,8 @@ def filter_components(probabilities, labeled, minimum):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint")
+    parser.add_argument("--deep-encoder", action="store_true")
+    parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--prefix", default=PREFIX)
     parser.add_argument("--minimum", type=int, nargs="+", default=CUTOFFS)
     args = parser.parse_args()
@@ -62,7 +64,7 @@ def main():
     device = torch.device("cuda")
     model = torch.nn.ModuleList()
     for name in checkpoints:
-        member = UNet(packed=True).to(device, memory_format=torch.channels_last)
+        member = UNet(packed=True, deep_encoder=args.deep_encoder).to(device, memory_format=torch.channels_last)
         member.load_state_dict(torch.load(OUTPUT / name, map_location=device, weights_only=True))
         model.append(member)
     model.eval()
@@ -100,7 +102,7 @@ def main():
     best = max(results, key=lambda row: row["validation_proxy"])
     (OUTPUT / f"{prefix}_sweep.json").write_text(json.dumps({"experiments": results, "selected": best}, indent=2))
     print(json.dumps({"experiments": results, "selected": best}), flush=True)
-    if not best["minimum_voxels"]:
+    if args.validation_only:
         return
     predictions = {}
     for keys, _, flipped in scan_probabilities(model, Slices("test"), device, 24, True):

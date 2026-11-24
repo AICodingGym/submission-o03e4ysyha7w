@@ -1,6 +1,7 @@
 """Train and evaluate a residual 2.5D U-Net on a fixed patient split."""
 import argparse
 import json
+import os
 import time
 from itertools import groupby
 from pathlib import Path
@@ -17,16 +18,21 @@ from prepare import CACHE
 from volume_metrics import normalized_hausdorff, remove_small_components
 
 
+CONTEXT = int(os.environ.get("GI_SEGMENTATION_CONTEXT", "3"))
+if CONTEXT not in (3, 5):
+    raise ValueError("GI_SEGMENTATION_CONTEXT must be 3 or 5")
+
+
 class Slices:
-    def __init__(self, name):
-        root = CACHE / name
+    def __init__(self, name, root=CACHE, context=CONTEXT):
+        root = root / name
         self.keys = json.loads((root / "keys.json").read_text())
         self.images = np.load(root / "images.npy", mmap_mode="r")
         self.masks = None if name == "test" else np.load(root / "masks.npy", mmap_mode="r")
         index = {key: i for i, key in enumerate(self.keys)}
         self.context = np.asarray([
             [index.get(f"{volume(key)}_slice_{int(key.rsplit('_', 1)[1]) + offset:04d}", i)
-             for offset in (-1, 0, 1)]
+             for offset in range(-(context // 2), context // 2 + 1)]
             for i, key in enumerate(self.keys)
         ])
 
@@ -56,11 +62,11 @@ class Residual(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, packed=False):
+    def __init__(self, packed=False, context=CONTEXT):
         super().__init__()
         self.packed = packed
         widths = (24, 40, 64, 96, 160)
-        self.stem = Residual(12 if packed else 3, widths[0])
+        self.stem = Residual(context * (4 if packed else 1), widths[0])
         self.encoder = nn.ModuleList(
             nn.Sequential(Residual(a, b, 2), Residual(b, b))
             for a, b in zip(widths, widths[1:])
@@ -112,11 +118,13 @@ def validate(model, data, device, batch):
     return metrics_row(dice(*totals.cpu().numpy()))
 
 
-def jitter_scale(images, masks):
+def jitter_scale(images, masks, translation=0.0):
     scale = torch.empty(len(images), device=images.device).uniform_(0.85, 1.15)
     transform = torch.zeros((len(images), 2, 3), device=images.device)
     transform[:, 0, 0] = scale
     transform[:, 1, 1] = scale
+    if translation:
+        transform[:, :, 2].uniform_(-translation, translation)
     grid = F.affine_grid(transform, images.shape, align_corners=False)
     return (F.grid_sample(images, grid, mode="bilinear", align_corners=False),
             F.grid_sample(masks, grid, mode="nearest", align_corners=False))
@@ -130,6 +138,8 @@ def train(model, device, args, prefix):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=0.00003)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
     best = -1
+    weights = torch.tensor([1.0, args.small_bowel_loss_weight, 1.0], device=device)
+    weights /= weights.sum()
     for epoch in range(1, args.epochs + 1):
         then = time.perf_counter()
         model.train()
@@ -140,7 +150,7 @@ def train(model, device, args, prefix):
             if rng.random() < 0.5:
                 images, masks = images.flip(-1), masks.flip(-1)
             if args.scale_jitter:
-                images, masks = jitter_scale(images, masks)
+                images, masks = jitter_scale(images, masks, args.translation_jitter)
             images = (images * rng.uniform(0.85, 1.15)).clamp_(0, 1)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device.type, enabled=device.type == "cuda"):
@@ -150,7 +160,8 @@ def train(model, device, args, prefix):
                 axes = (0, 2, 3)
                 overlap = (probabilities * masks).sum(axes)
                 soft_dice = (2 * overlap + 1) / ((probabilities + masks).sum(axes) + 1)
-                loss = bce + 1 - soft_dice.mean()
+                dice_score = soft_dice.mean() if args.small_bowel_loss_weight == 1 else (soft_dice * weights).sum()
+                loss = bce + 1 - dice_score
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -363,9 +374,15 @@ def main():
                         help="Process 2x2 input neighborhoods as channels at half resolution")
     parser.add_argument("--fine-tune-from", type=Path)
     parser.add_argument("--scale-jitter", action="store_true")
+    parser.add_argument("--small-bowel-loss-weight", type=float, default=1.0)
+    parser.add_argument("--translation-jitter", type=float, default=0.0)
     parser.add_argument("--ensemble", type=Path, nargs="+", metavar="WEIGHTS",
                         help="Average probabilities from multiple checkpoints during evaluation")
     args = parser.parse_args()
+    if not 0 <= args.translation_jitter <= 1 or (args.translation_jitter and not args.scale_jitter):
+        parser.error("translation jitter requires scale jitter and a value from 0 to 1")
+    if not np.isfinite(args.small_bowel_loss_weight) or args.small_bowel_loss_weight <= 0:
+        parser.error("small bowel loss weight must be positive and finite")
     if args.batch < 1 or args.epochs < 1:
         parser.error("batch size and epochs must be positive")
     if args.ensemble and (not args.evaluate or args.fine_tune_from or len(args.ensemble) < 2):
@@ -373,10 +390,16 @@ def main():
     prefix = "packed" if args.packed else "unet"
     if SIZE != 192:
         prefix += str(SIZE)
+    if CONTEXT != 3:
+        prefix += f"_context{CONTEXT}"
     if args.fine_tune_from:
         prefix += "_scale_jitter" if args.scale_jitter else "_control"
     elif args.scale_jitter:
         prefix += "_scale_jitter"
+    if args.small_bowel_loss_weight != 1:
+        prefix += f"_bowel_weight{args.small_bowel_loss_weight:g}"
+    if args.translation_jitter:
+        prefix += f"_translation{args.translation_jitter:g}"
     torch.manual_seed(102)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.allow_tf32 = True
@@ -393,6 +416,13 @@ def main():
     if not args.evaluate:
         if args.fine_tune_from:
             weights = torch.load(args.fine_tune_from, map_location=device, weights_only=True)
+            destination = model.state_dict()
+            for name in ("stem.body.0.weight", "stem.skip.0.weight"):
+                extra = destination[name].shape[1] - weights[name].shape[1]
+                if extra > 0:
+                    padded = torch.zeros_like(destination[name])
+                    padded[:, extra // 2:extra // 2 + weights[name].shape[1]] = weights[name]
+                    weights[name] = padded
             model.load_state_dict(weights)
         train(model, device, args, prefix)
     model.load_state_dict(torch.load(OUTPUT / f"{prefix}.pt", map_location=device, weights_only=True))

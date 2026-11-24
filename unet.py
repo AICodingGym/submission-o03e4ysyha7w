@@ -12,7 +12,7 @@ from PIL import Image
 from torch import nn
 
 from atlas import BINS, OUTPUT, dice, make_review, position_keys, resize
-from dataset import CLASSES, DatasetArchive, encode, patient, volume
+from dataset import CLASSES, SIZE, DatasetArchive, encode, patient, volume
 from prepare import CACHE
 from volume_metrics import normalized_hausdorff, remove_small_components
 
@@ -371,6 +371,8 @@ def main():
     if args.ensemble and (not args.evaluate or args.fine_tune_from or len(args.ensemble) < 2):
         parser.error("ensemble evaluation needs --evaluate and at least two checkpoints")
     prefix = "packed" if args.packed else "unet"
+    if SIZE != 192:
+        prefix += str(SIZE)
     if args.fine_tune_from:
         prefix += "_scale_jitter" if args.scale_jitter else "_control"
     elif args.scale_jitter:

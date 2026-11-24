@@ -1,6 +1,7 @@
 """Dataset inspection, patient split, and checked competition CSV export."""
 import csv
 import io
+import os
 import random
 import re
 from collections import Counter, defaultdict
@@ -12,7 +13,7 @@ from PIL import Image
 
 CLASSES = ("large_bowel", "small_bowel", "stomach")
 ARCHIVE = Path("data/uw-madison-gi-tract-image-segmentation.zip")
-SIZE = 192
+SIZE = int(os.environ.get("GI_SEGMENTATION_SIZE", "192"))
 
 
 def rows(archive, name):

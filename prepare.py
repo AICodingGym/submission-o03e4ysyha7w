@@ -8,7 +8,7 @@ from PIL import Image
 from atlas import resize
 from dataset import CLASSES, SIZE, DatasetArchive, patient, volume
 
-CACHE = Path("outputs/cache")
+CACHE = Path("outputs/cache" if SIZE == 192 else f"outputs/cache_{SIZE}")
 BILINEAR = Image.Resampling.BILINEAR
 
 

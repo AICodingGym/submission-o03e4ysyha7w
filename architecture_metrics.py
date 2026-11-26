@@ -82,7 +82,7 @@ def evaluate(models, archive, batch, name, *, quick=False, flip=True, thresholds
         trials = [(fixed, count)] if quick else [(0.5, 0), (fixed, 0), (fixed, count)] + [
             (threshold, count) for threshold in GRID
         ]
-        if largest and organ == 2:
+        if largest:
             trials.append((fixed, -1))
         settings.append(tuple(dict.fromkeys(trials)))
     aggregates = [[np.zeros(3, dtype=np.int64) for _ in trials] for trials in settings]

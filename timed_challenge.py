@@ -1,11 +1,13 @@
-﻿"""Run staged, deadline-bounded experiments while keeping a verified incumbent CSV."""
+"""Run staged, deadline-bounded experiments while keeping a verified incumbent CSV."""
 import argparse
 import csv
+import ctypes
 from dataclasses import dataclass, replace
 from datetime import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -209,11 +211,81 @@ def run(start):
     print("Experiments closed. Best", candidate.name, metrics["macro_dice"], flush=True)
 
 
+def finalize(start):
+    cutoff, deadline = start + 75 * 60, start + 90 * 60
+    schedule = dict(start=datetime.fromtimestamp(start).astimezone().isoformat(),
+                    stop_experiments=datetime.fromtimestamp(cutoff).astimezone().isoformat(),
+                    final_deadline=datetime.fromtimestamp(deadline).astimezone().isoformat())
+    (ROOT / "timed_schedule.json").write_text(json.dumps(schedule, indent=2))
+    print(schedule, flush=True)
+    execution_state = ctypes.windll.kernel32.SetThreadExecutionState if os.name == "nt" else None
+    if execution_state:
+        execution_state(0x80000001)
+    try:
+        while time.time() < cutoff + 2:
+            time.sleep(min(15, cutoff + 2 - time.time()))
+        data = json.loads(STATE.read_text())
+        prior = Candidate(**data["candidate"])
+        metrics = data["metrics"]
+        candidate = prior
+        remaining = deadline - time.time()
+        official_reference = json.loads((ROOT / "reference_assessment.json").read_text())["fixed_cleanup"]
+        if (remaining >= (12 if prior.resolution == 320 else 10) * 60 and len(prior.members) == 1
+                and metrics["macro_dice"] >= official_reference["macro_dice"] + 0.005):
+            name = f"timed_{int(start)}_final_refit"
+            checkpoint = prior.members[0].split(":")[1]
+            refit = replace(prior, name=name, members=(f"{CANDIDATE}:{name}",))
+            training_stop = deadline - 5 * 60
+            fit = call(refit, training_stop, "architecture_trials.py", "train",
+                       "--model", CANDIDATE, "--run", name, "--initialize", checkpoint,
+                       "--objective", prior.objective, "--epochs", 1, "--lr", 0.00001,
+                       "--warmup", 0.08, "--budget", 10, "--deadline", training_stop,
+                       "--all-labeled", "--save-each-epoch")
+            accepted = False
+            if fit and (ROOT / f"{name}.pt").exists():
+                prior_report = json.loads((ROOT / f"{prior.name}_assessment.json").read_text())
+                prior_report.update(metrics_from_before_refit=prior.name)
+                (ROOT / f"{name}_assessment.json").write_text(json.dumps(prior_report, indent=2))
+                accepted = call(refit, deadline - 140, "architecture_metrics.py", "export", "--name",
+                                name, "--models", *refit.members, "--dice-only")
+                if accepted:
+                    promote(refit, metrics)
+                    candidate = refit
+            record("Final train+validation refit (held-out metrics belong to the source model)",
+                   refit, trained=True, accepted=accepted)
+        path = OUTPUT / "submission.csv"
+        audit(path)
+        remaining = deadline - time.time()
+        if remaining < 1:
+            raise TimeoutError("Deadline reached before upload; validated submission remains saved")
+        cmd = ["aicodinggym", "mle", "submit", "uw-madison-gi-tract-image-segmentation",
+               "-F", str(path), "--no-upload-logs", "-m", f"Timed validation winner {candidate.name}"]
+        with (ROOT / "timed_official.log").open("w", encoding="utf-8") as stream:
+            result = subprocess.run(cmd, stdout=stream, stderr=subprocess.STDOUT,
+                                    timeout=max(1, deadline - time.time()))
+        receipt = (ROOT / "timed_official.log").read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"Score:\s*(\d+(?:\.\d+)?)", receipt)
+        score = float(match[1]) if match else None
+        record("Official submission", candidate, None if candidate != prior else metrics,
+               leaderboard=score if score is not None else "",
+               accepted=result.returncode == 0)
+        finished = datetime.now().astimezone().isoformat()
+        (ROOT / "timed_final.json").write_text(json.dumps(
+            dict(name=candidate.name, score=score, returncode=result.returncode,
+                 holdout_source=prior.name, holdout_metrics=metrics, finished=finished), indent=2))
+        print("Official result", score, "at", finished, flush=True)
+    finally:
+        if execution_state:
+            execution_state(0x80000000)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", required=True)
+    parser.add_argument("--finalize", action="store_true")
     args = parser.parse_args()
-    run(datetime.fromisoformat(args.start).timestamp())
+    action = finalize if args.finalize else run
+    action(datetime.fromisoformat(args.start).timestamp())
 
 
 if __name__ == "__main__":

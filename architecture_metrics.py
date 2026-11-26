@@ -1,4 +1,4 @@
-﻿"""Score and export architecture candidates using native masks and 3D distances."""
+"""Score and export architecture candidates using native masks and 3D distances."""
 import argparse
 import hashlib
 import json
@@ -77,8 +77,9 @@ def evaluate(models, archive, batch, name, *, quick=False, flip=True, thresholds
     validation = Slices("validation")
     if minimum is None:
         minimum = tuple(round(n * (SIZE / 256) ** 2) for n in MINIMUM)
+    minimums = tuple(minimum)
     settings = []
-    for organ, (fixed, count) in enumerate(zip(thresholds, minimum)):
+    for organ, (fixed, count) in enumerate(zip(thresholds, minimums)):
         trials = [(fixed, count)] if quick else [(0.5, 0), (fixed, 0), (fixed, count)] + [
             (threshold, count) for threshold in GRID
         ]
@@ -122,7 +123,7 @@ def evaluate(models, archive, batch, name, *, quick=False, flip=True, thresholds
         raw=None if quick else summarize([rows[0.5, 0] for rows in per_organ]),
         fixed_no_cleanup=None if quick else summarize([rows[fixed, 0] for rows, fixed in zip(per_organ, thresholds)]),
         fixed_cleanup=summarize([rows[fixed, minimum] for rows, fixed, minimum
-                                 in zip(per_organ, thresholds, minimum)]),
+                                 in zip(per_organ, thresholds, minimums)]),
         tuned_cleanup=summarize(selected),
         flip=flip,
         trials={organ: list(rows.values()) for organ, rows in zip(CLASSES, per_organ)},

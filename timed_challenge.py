@@ -121,25 +121,35 @@ def call(candidate, deadline, script, *args):
         return False
 
 
-def run(start):
+def run(start, resume=False):
     stop = start + 75 * 60
-    candidate = Candidate(CANDIDATE)
-    metrics = read_metrics(candidate)
-    if not (ROOT / f"{candidate.name}_submission.csv").exists():
-        raise RuntimeError("The pretrained baseline export is missing")
-    promote(candidate, metrics)
-    record("Reuse completed pretrained 256-pixel U-Net", candidate, metrics, accepted=True)
+    if resume:
+        state = json.loads(STATE.read_text())
+        candidate, metrics = Candidate(**state["candidate"]), state["metrics"]
+        candidate = replace(candidate, members=tuple(candidate.members))
+    else:
+        candidate = Candidate(CANDIDATE)
+        metrics = read_metrics(candidate)
+        if not (ROOT / f"{candidate.name}_submission.csv").exists():
+            raise RuntimeError("The pretrained baseline export is missing")
+        promote(candidate, metrics)
+        record("Reuse completed pretrained 256-pixel U-Net", candidate, metrics, accepted=True)
     while time.time() < start + 15 * 60:
         time.sleep(min(10, start + 15 * 60 - time.time()))
     previous = []
-    anchor = str(int(start))
+    if resume and candidate.name == f"timed_{int(start)}_resolution":
+        previous.append(replace(candidate, name=f"{candidate.name}_epoch1",
+                                members=(f"{CANDIDATE}:{candidate.name}_epoch1",)))
+    anchor = str(int(start)) + ("_resume" if resume else "")
     for step, label in (("resolution", "320-pixel continuation"),
                         ("loss", "Tversky instead of Dice under BCE"),
                         ("context", "Five adjacent slices"),
                         ("no_flip", "Flip TTA ablation"),
                         ("threshold", "Organ-specific threshold sweep"),
-                        ("largest", "Largest stomach component"),
+                        ("largest", "Largest connected component per organ"),
                         ("ensemble", "Average compatible checkpoints")):
+        if resume and step in ("resolution", "loss"):
+            continue
         remaining = stop - time.time()
         reserve = {"resolution": 14, "loss": 12, "context": 10, "no_flip": 5,
                    "threshold": 8, "largest": 5, "ensemble": 6}[step] * 60
@@ -283,9 +293,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", required=True)
     parser.add_argument("--finalize", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
-    action = finalize if args.finalize else run
-    action(datetime.fromisoformat(args.start).timestamp())
+    start = datetime.fromisoformat(args.start).timestamp()
+    if args.finalize:
+        finalize(start)
+    else:
+        run(start, args.resume)
 
 
 if __name__ == "__main__":

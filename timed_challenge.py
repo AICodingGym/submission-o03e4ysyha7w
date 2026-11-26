@@ -245,18 +245,18 @@ def finalize(start):
             name = f"timed_{int(start)}_final_refit"
             checkpoint = prior.members[0].split(":")[1]
             refit = replace(prior, name=name, members=(f"{CANDIDATE}:{name}",))
-            training_stop = deadline - 5 * 60
+            training_stop = deadline - 210
             fit = call(refit, training_stop, "architecture_trials.py", "train",
                        "--model", CANDIDATE, "--run", name, "--initialize", checkpoint,
                        "--objective", prior.objective, "--epochs", 1, "--lr", 0.00001,
                        "--warmup", 0.08, "--budget", 10, "--deadline", training_stop,
-                       "--all-labeled", "--save-each-epoch")
+                       "--batch", 24, "--all-labeled", "--save-each-epoch")
             accepted = False
             if fit and (ROOT / f"{name}.pt").exists():
                 prior_report = json.loads((ROOT / f"{prior.name}_assessment.json").read_text())
                 prior_report.update(metrics_from_before_refit=prior.name)
                 (ROOT / f"{name}_assessment.json").write_text(json.dumps(prior_report, indent=2))
-                accepted = call(refit, deadline - 140, "architecture_metrics.py", "export", "--name",
+                accepted = call(refit, deadline - 105, "architecture_metrics.py", "export", "--name",
                                 name, "--models", *refit.members, "--dice-only")
                 if accepted:
                     promote(refit, metrics)

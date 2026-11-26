@@ -12,7 +12,7 @@ from torchvision.models import resnet34
 
 from architecture_clock import awake_seconds
 from dataset import SIZE
-from unet import OUTPUT, Slices, UNet, batches, jitter_scale, validate
+from unet import CONTEXT, OUTPUT, Slices, UNet, batches, jitter_scale, validate
 
 ROOT = OUTPUT / "architecture"
 WEIGHTS = ROOT / "resnet34-b627a593.pth"
@@ -43,6 +43,12 @@ class ResNetDecoder(nn.Module):
         if pretrained:
             self.encoder.load_state_dict(torch.load(WEIGHTS, map_location="cpu", weights_only=True))
         self.encoder.fc = nn.Identity()
+        if CONTEXT == 5:
+            original = self.encoder.conv1
+            self.encoder.conv1 = nn.Conv2d(5, 64, 7, stride=2, padding=3, bias=False)
+            with torch.no_grad():
+                self.encoder.conv1.weight.zero_()
+                self.encoder.conv1.weight[:, 1:4].copy_(original.weight)
         widths = (64, 64, 128, 256, 512)
         out = (24, 32, 48, 80)
         self.nodes = nn.ModuleDict()
@@ -129,6 +135,34 @@ def profile(name, batch):
                 peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
 
 
+class AllTrainingSlices:
+    """Draw from both labeled caches with their original scan neighborhoods."""
+
+    def __init__(self):
+        self.fit = Slices("fit")
+        self.validation = Slices("validation")
+        self.keys = self.fit.keys + self.validation.keys
+
+    def _read(self, indices, device, method):
+        use_fit = indices < len(self.fit.keys)
+        if use_fit.all():
+            return getattr(self.fit, method)(indices, device)
+        if not use_fit.any():
+            return getattr(self.validation, method)(indices - len(self.fit.keys), device)
+        fit = getattr(self.fit, method)(indices[use_fit], device)
+        validation = getattr(self.validation, method)(indices[~use_fit] - len(self.fit.keys), device)
+        combined = fit.new_empty((len(indices), *fit.shape[1:]))
+        combined[torch.as_tensor(use_fit, device=device)] = fit
+        combined[torch.as_tensor(~use_fit, device=device)] = validation
+        return combined
+
+    def inputs(self, indices, device):
+        return self._read(indices, device, "inputs").contiguous(memory_format=torch.channels_last)
+
+    def targets(self, indices, device):
+        return self._read(indices, device, "targets")
+
+
 def train(args):
     torch.manual_seed(102)
     np_rng = np.random.default_rng(102)
@@ -136,14 +170,20 @@ def train(args):
     start = awake_seconds()
     model = make_model(args.model, pretrained=not args.initialize).to(device, memory_format=torch.channels_last)
     if args.initialize:
-        model.load_state_dict(torch.load(ROOT / f"{args.initialize}.pt", map_location=device, weights_only=True))
-    fit, val = Slices("fit"), Slices("validation")
+        weights = torch.load(ROOT / f"{args.initialize}.pt", map_location=device, weights_only=True)
+        stem = "encoder.conv1.weight"
+        if CONTEXT == 5 and weights[stem].shape[1] == 3:
+            base = weights[stem]
+            weights[stem] = F.pad(base, (0, 0, 0, 0, 1, 1))
+        model.load_state_dict(weights)
+    fit = AllTrainingSlices() if args.all_labeled else Slices("fit")
+    val = None if args.all_labeled else Slices("validation")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, fused=True)
     scaler = torch.amp.GradScaler("cuda")
     micro_batches = math.ceil(len(fit.keys) / args.batch)
     steps = math.ceil(micro_batches / args.accumulation)
     max_steps = args.epochs * steps
-    warm_steps = steps
+    warm_steps = max(1, int(steps * args.warmup))
     def lr_multiplier(step):
         if step < warm_steps:
             return 0.1 + 0.9 * (step + 1) / warm_steps
@@ -153,7 +193,7 @@ def train(args):
     best, stagnant = -1.0, 0
     completed, reason = 0, "epoch_limit"
     for epoch in range(1, args.epochs + 1):
-        if awake_seconds() - start >= args.budget * 60:
+        if time.time() >= args.deadline or awake_seconds() - start >= args.budget * 60:
             print("Training budget reached", flush=True)
             reason = "time_budget"
             break
@@ -162,6 +202,9 @@ def train(args):
         loss_sum = torch.zeros((), device=device)
         opt.zero_grad(set_to_none=True)
         for i, ix in enumerate(batches(len(fit.keys), args.batch, np_rng)):
+            if i % 32 == 0 and (time.time() >= args.deadline or awake_seconds() - start >= args.budget * 60):
+                reason = "time_budget"
+                break
             x, y = fit.inputs(ix, device), fit.targets(ix, device)
             if np_rng.random() < 0.5:
                 x, y = x.flip(-1), y.flip(-1)
@@ -179,8 +222,10 @@ def train(args):
                     schedule.step()
             if (i + 1) % 500 == 0:
                 print(f"{args.run} epoch {epoch} batch {i+1}/{micro_batches}", flush=True)
+        if reason == "time_budget":
+            break
         train_seconds = awake_seconds() - epoch_start
-        row = validate(model, val, device, args.batch)
+        row = validate(model, val, device, args.batch) if val is not None else {}
         row.update(epoch=epoch, loss=float(loss_sum / len(fit.keys)), train_seconds=train_seconds,
                    validation_seconds=awake_seconds() - epoch_start - train_seconds,
                    lr=opt.param_groups[0]["lr"])
@@ -188,13 +233,21 @@ def train(args):
             f.write(json.dumps(row) + "\n")
         print(row, flush=True)
         completed = epoch
-        if row["macro_dice"] > best:
-            best, stagnant = row["macro_dice"], 0
+        if args.save_each_epoch:
+            temp = ROOT / f"{args.run}_epoch{epoch}.tmp"
+            torch.save(model.state_dict(), temp)
+            temp.replace(ROOT / f"{args.run}_epoch{epoch}.pt")
+        if val is None or row["macro_dice"] > best:
+            best, stagnant = row.get("macro_dice"), 0
             temp = ROOT / f"{args.run}.tmp"
             torch.save(model.state_dict(), temp)
             temp.replace(ROOT / f"{args.run}.pt")
         else:
             stagnant += 1
+        if (val is not None and args.stop_below is not None and epoch >= math.ceil(args.epochs / 2)
+                and best < args.stop_below):
+            reason = "below_halfway_floor"
+            break
         if stagnant >= 10:
             print("Early stopped after 10 epochs without higher validation Dice", flush=True)
             reason = "patience"
@@ -215,12 +268,17 @@ def main():
     parser.add_argument("--accumulation", type=int, default=2)
     parser.add_argument("--epochs", type=int, default=42)
     parser.add_argument("--budget", type=float, default=200)
+    parser.add_argument("--deadline", type=float, default=float("inf"))
+    parser.add_argument("--warmup", type=float, default=1.0)
+    parser.add_argument("--save-each-epoch", action="store_true")
+    parser.add_argument("--all-labeled", action="store_true")
+    parser.add_argument("--stop-below", type=float)
     parser.add_argument("--lr", type=float, default=0.00035)
     parser.add_argument("--initialize")
     parser.add_argument("--objective", choices=("bce", "tversky"), default="bce")
     args = parser.parse_args()
-    if SIZE != 256 or args.batch < 1 or args.accumulation < 1:
-        parser.error("Use the 256-pixel cache and positive batch and accumulation sizes")
+    if SIZE not in (256, 320, 384) or args.batch < 1 or args.accumulation < 1:
+        parser.error("Use a supported cache resolution and positive batch and accumulation sizes")
     ROOT.mkdir(exist_ok=True, parents=True)
     if args.action == "profile":
         results = [profile(name, args.batch) for name in ("current", *NAMES)]
